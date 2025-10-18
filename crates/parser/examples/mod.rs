@@ -8,7 +8,7 @@ use tokio::time::{sleep, Duration};
 async fn main() {
     let worker = ParserWorker::new();
     let storage = JsonFileStorage::new("results");
-    let (scheduler, receiver) = Scheduler::new(worker, storage, 20, 4); // max 4 concurrent jobs
+    let (scheduler, receiver) = Scheduler::with_single_worker(worker, storage, 20, 4);
 
     let scheduler_clone = scheduler.clone();
     tokio::spawn(async move {
