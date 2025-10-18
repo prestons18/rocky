@@ -1,37 +1,31 @@
+use rocky_core::{Action, Job};
 use rocky_parser::ParserWorker;
-use rocky_core::{Action, Job, JobWorker};
-use tokio;
+use rocky_scheduler::Scheduler;
 
 #[tokio::main]
 async fn main() {
-    let job = Job {
-        id: "job-001".to_string(),
-        url: "https://example.com".to_string(),
-        use_browser: false,
-        actions: vec![
-            Action::WaitFor {
-                selector: "h1".to_string(),
-                timeout_ms: 5000,
-            },
-            Action::Extract {
-                selector: "p".to_string(),
-                attr: None,
-            },
-        ],
-    };
-
     let worker = ParserWorker::new();
+    let scheduler = Scheduler::new(worker);
 
-    match worker.execute(&job).await {
-        Ok(result) => {
-            println!("Job {} succeeded!", result.job_id);
-            println!(
-                "Output:\n{}",
-                serde_json::to_string_pretty(&result.output).unwrap()
-            );
-        }
-        Err(err) => {
-            eprintln!("Job {} failed: {}", job.id, err);
-        }
-    }
+    let jobs = vec![
+        Job {
+            id: "job-001".to_string(),
+            url: "https://example.com".to_string(),
+            use_browser: false,
+            actions: vec![
+                Action::WaitFor { selector: "h1".to_string(), timeout_ms: 5000 },
+                Action::Extract { selector: "p".to_string(), attr: None },
+            ],
+        },
+        Job {
+            id: "job-002".to_string(),
+            url: "https://example.org".to_string(),
+            use_browser: false,
+            actions: vec![
+                Action::WaitFor { selector: "h1".to_string(), timeout_ms: 5000 },
+            ],
+        },
+    ];
+
+    scheduler.run_jobs(jobs).await;
 }
