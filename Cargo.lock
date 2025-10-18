@@ -1076,6 +1076,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "rocky_core",
+ "rocky_storage",
  "serde_json",
 ]
 

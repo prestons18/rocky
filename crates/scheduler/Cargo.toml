@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-futures = "0.3.31"
 rocky_core = { path = "../core" }
+rocky_storage = { path = "../storage" }
+
+futures = "0.3.31"
 serde_json = "1.0.145"
