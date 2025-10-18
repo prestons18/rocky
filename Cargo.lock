@@ -1065,6 +1065,7 @@ dependencies = [
  "reqwest",
  "rocky_core",
  "rocky_scheduler",
+ "rocky_storage",
  "scraper",
  "serde_json",
  "tokio",

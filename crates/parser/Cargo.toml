@@ -13,3 +13,4 @@ rocky_core = { path = "../core" }
 rocky_scheduler = { path = "../scheduler" }
 
 tokio = { version = "1.48.0", features = ["full"] } # Not required, this is just for the example.
+rocky_storage = { path = "../storage" } # Not required either, just for example.

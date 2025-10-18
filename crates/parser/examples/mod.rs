@@ -1,11 +1,13 @@
 use rocky_core::{Action, Job};
 use rocky_parser::ParserWorker;
 use rocky_scheduler::Scheduler;
+use rocky_storage::JsonFileStorage;
 
 #[tokio::main]
 async fn main() {
     let worker = ParserWorker::new();
-    let scheduler = Scheduler::new(worker);
+    let storage = JsonFileStorage::new("results");
+    let scheduler = Scheduler::new(worker, storage);
 
     let jobs = vec![
         Job {
