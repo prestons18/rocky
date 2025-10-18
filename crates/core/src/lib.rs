@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -37,6 +38,7 @@ pub enum JobError {
     ActionError(String),
 }
 
-pub trait JobWorker {
-    fn execute(&self, job: &Job) -> Result<JobResult, JobError>;
+#[async_trait]
+pub trait JobWorker: Send + Sync {
+    async fn execute(&self, job: &Job) -> Result<JobResult, JobError>;
 }
