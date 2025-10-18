@@ -1,4 +1,4 @@
-use parser::ParserWorker;
+use rocky_parser::ParserWorker;
 use rocky_core::{Action, Job, JobWorker};
 use tokio;
 
