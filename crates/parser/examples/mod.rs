@@ -1,4 +1,4 @@
-use rocky_core::{Action, Job};
+use rocky_core::{Action, Job, ScrapingAction};
 use rocky_parser::ParserWorker;
 use rocky_scheduler::Scheduler;
 use rocky_storage::JsonFileStorage;
@@ -21,14 +21,18 @@ async fn main() {
             url: "https://example.com".to_string(),
             use_browser: false,
             actions: vec![
-                Action::WaitFor {
+                Action::Scraping(ScrapingAction::WaitFor {
                     selector: "h1".to_string(),
                     timeout_ms: 5000,
-                },
-                Action::Extract {
+                }),
+                Action::Scraping(ScrapingAction::Extract {
                     selector: "p".to_string(),
                     attr: None,
-                },
+                }),
+                Action::Scraping(ScrapingAction::ExtractMultiple {
+                    selector: "a".to_string(),
+                    attrs: vec!["href".to_string(), "text".to_string()],
+                }),
             ],
             browser_config: None,
         };

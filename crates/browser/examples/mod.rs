@@ -1,5 +1,5 @@
 use browser::BrowserWorker;
-use rocky_core::{Action, BrowserConfig, BrowserType, Job};
+use rocky_core::{Action, BrowserAction, BrowserConfig, BrowserType, Job, ScrapingAction, ScrollTarget};
 use rocky_parser::ParserWorker;
 use rocky_scheduler::Scheduler;
 use rocky_storage::JsonFileStorage;
@@ -16,35 +16,82 @@ async fn main() {
     tokio::spawn(async move { scheduler.run(receiver).await });
 
     let jobs = vec![
+        // Simple scraping job with parser
         Job {
             id: "job-001".to_string(),
             url: "https://example.com".to_string(),
             use_browser: false,
-            actions: vec![Action::Extract {
-                selector: "p".to_string(),
-                attr: None,
-            }],
+            actions: vec![
+                Action::Scraping(ScrapingAction::Extract {
+                    selector: "p".to_string(),
+                    attr: None,
+                }),
+                Action::Scraping(ScrapingAction::ExtractMultiple {
+                    selector: "a".to_string(),
+                    attrs: vec!["href".to_string(), "text".to_string()],
+                }),
+            ],
             browser_config: None,
         },
+        // Browser automation job with interactions
         Job {
             id: "job-002".to_string(),
             url: "https://example.org".to_string(),
             use_browser: true,
             actions: vec![
-                Action::WaitFor {
+                Action::Scraping(ScrapingAction::WaitFor {
                     selector: "h1".to_string(),
                     timeout_ms: 5000,
-                },
-                Action::Extract {
+                }),
+                Action::Browser(BrowserAction::Scroll {
+                    target: ScrollTarget::Bottom,
+                }),
+                Action::Scraping(ScrapingAction::Extract {
                     selector: "p".to_string(),
                     attr: None,
-                },
+                }),
+                Action::Browser(BrowserAction::Screenshot {
+                    path: "results/job-002-screenshot.png".to_string(),
+                    full_page: true,
+                }),
             ],
             browser_config: Some(BrowserConfig {
                 browser_type: BrowserType::Chromium,
                 headless: true,
                 viewport_width: Some(1920),
                 viewport_height: Some(1080),
+            }),
+        },
+        Job {
+            id: "job-003".to_string(),
+            url: "https://www.google.com".to_string(),
+            use_browser: true,
+            actions: vec![
+                Action::Scraping(ScrapingAction::WaitFor {
+                    selector: "textarea[name='q']".to_string(),
+                    timeout_ms: 5000,
+                }),
+                Action::Browser(BrowserAction::Type {
+                    selector: "textarea[name='q']".to_string(),
+                    text: "Rust programming language".to_string(),
+                    clear_first: true,
+                }),
+                Action::Browser(BrowserAction::PressKey {
+                    key: "Enter".to_string(),
+                }),
+                Action::Browser(BrowserAction::Scroll {
+                    target: ScrollTarget::Bottom,
+                }),
+                Action::Browser(BrowserAction::Screenshot {
+                    path: "results/job-003-screenshot.png".to_string(),
+                    full_page: false,
+                }),
+            ],
+            browser_config: Some(BrowserConfig {
+                browser_type: BrowserType::Chromium,
+                headless: false,
+                viewport_width: Some(1280),
+                viewport_height: Some(720),
             }),
         },
     ];
@@ -54,5 +101,5 @@ async fn main() {
         sleep(Duration::from_millis(200)).await;
     }
 
-    sleep(Duration::from_secs(5)).await;
+    sleep(Duration::from_secs(10)).await;
 }

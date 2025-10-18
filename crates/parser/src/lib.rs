@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use rocky_core::{Action, Job, JobError, JobResult, JobWorker};
+use rocky_core::{Action, Job, JobError, JobResult, JobWorker, ScrapingAction};
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::json;
@@ -11,6 +11,58 @@ pub struct ParserWorker {
 impl ParserWorker {
     pub fn new() -> Self {
         Self { client: Client::new() }
+    }
+
+    fn handle_scraping_action(
+        &self,
+        action: &ScrapingAction,
+        document: &Html,
+        output: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), JobError> {
+        match action {
+            ScrapingAction::WaitFor { selector, .. } => {
+                let sel = Selector::parse(selector)
+                    .map_err(|e| JobError::ActionError(e.to_string()))?;
+                let found = document.select(&sel).next().is_some();
+                output.insert(format!("waitfor:{}", selector), json!(found));
+            }
+            ScrapingAction::Extract { selector, attr } => {
+                let sel = Selector::parse(selector)
+                    .map_err(|e| JobError::ActionError(e.to_string()))?;
+                let values: Vec<String> = document
+                    .select(&sel)
+                    .map(|el| {
+                        if let Some(a) = attr {
+                            el.value().attr(a).unwrap_or("").to_string()
+                        } else {
+                            el.text().collect::<Vec<_>>().join("")
+                        }
+                    })
+                    .collect();
+                output.insert(format!("extract:{}", selector), json!(values));
+            }
+            ScrapingAction::ExtractMultiple { selector, attrs } => {
+                let sel = Selector::parse(selector)
+                    .map_err(|e| JobError::ActionError(e.to_string()))?;
+                let results: Vec<serde_json::Value> = document
+                    .select(&sel)
+                    .map(|el| {
+                        let mut obj = serde_json::Map::new();
+                        for attr in attrs {
+                            let value = if attr == "text" {
+                                el.text().collect::<Vec<_>>().join("")
+                            } else {
+                                el.value().attr(attr).unwrap_or("").to_string()
+                            };
+                            obj.insert(attr.clone(), json!(value));
+                        }
+                        serde_json::Value::Object(obj)
+                    })
+                    .collect();
+                output.insert(format!("extract_multiple:{}", selector), json!(results));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -33,26 +85,13 @@ impl JobWorker for ParserWorker {
         // Process each action sequentially
         for action in &job.actions {
             match action {
-                Action::WaitFor { selector, .. } => {
-                    let sel = Selector::parse(selector)
-                        .map_err(|e| JobError::ActionError(e.to_string()))?;
-                    let found = document.select(&sel).next().is_some();
-                    output.insert(format!("waitfor:{}", selector), json!(found));
+                Action::Scraping(scraping_action) => {
+                    self.handle_scraping_action(scraping_action, &document, &mut output)?;
                 }
-                Action::Extract { selector, attr } => {
-                    let sel = Selector::parse(selector)
-                        .map_err(|e| JobError::ActionError(e.to_string()))?;
-                    let values: Vec<String> = document
-                        .select(&sel)
-                        .map(|el| {
-                            if let Some(a) = attr {
-                                el.value().attr(a).unwrap_or("").to_string()
-                            } else {
-                                el.text().collect::<Vec<_>>().join("")
-                            }
-                        })
-                        .collect();
-                    output.insert(format!("extract:{}", selector), json!(values));
+                Action::Browser(_) => {
+                    return Err(JobError::ActionError(
+                        "ParserWorker cannot execute browser actions. Use BrowserWorker instead.".to_string()
+                    ));
                 }
             }
         }

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
-use rocky_core::{Job, JobResult, JobError, JobWorker, Action, BrowserConfig};
+use rocky_core::{Job, JobResult, JobError, JobWorker, Action, BrowserConfig, ScrapingAction, BrowserAction, ScrollTarget};
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::page::Page;
 use chromiumoxide::browser::HeadlessMode;
+use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotParams, CaptureScreenshotFormat};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -61,51 +62,315 @@ impl BrowserWorker {
 
         for action in &job.actions {
             match action {
-                Action::WaitFor { selector, timeout_ms } => {
-                    // Wait for selector by polling with evaluate
-                    let timeout = Duration::from_millis(*timeout_ms);
-                    let start = std::time::Instant::now();
-                    loop {
-                        let js = format!("document.querySelector('{}') !== null", selector);
-                        let result = page.evaluate(js).await
-                            .map_err(|e| JobError::ActionError(format!("WaitFor eval failed: {}", e)))?;
-                        
-                        if let Some(val) = result.value() {
-                            if val.as_bool() == Some(true) {
-                                break;
-                            }
-                        }
-                        
-                        if start.elapsed() > timeout {
-                            return Err(JobError::ActionError(format!("Timeout waiting for selector: {}", selector)));
-                        }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    output.insert(format!("waitfor:{}", selector), json!(true));
+                Action::Scraping(scraping_action) => {
+                    self.handle_scraping_action(scraping_action, page, &mut output).await?;
                 }
-                Action::Extract { selector, attr } => {
-                    let js = if let Some(a) = attr {
-                        format!(
-                            r#"Array.from(document.querySelectorAll("{}")).map(e => e.getAttribute("{}"))"#,
-                            selector, a
-                        )
-                    } else {
-                        format!(
-                            r#"Array.from(document.querySelectorAll("{}")).map(e => e.textContent)"#,
-                            selector
-                        )
-                    };
-
-                    let eval = page.evaluate(js).await
-                        .map_err(|e| JobError::ActionError(format!("Extract JS failed: {}", e)))?;
-
-                    let values = eval.value().cloned().unwrap_or(json!([]));
-                    output.insert(format!("extract:{}", selector), values);
+                Action::Browser(browser_action) => {
+                    self.handle_browser_action(browser_action, page, &mut output).await?;
                 }
             }
         }
 
         Ok(serde_json::Value::Object(output))
+    }
+
+    async fn handle_scraping_action(
+        &self,
+        action: &ScrapingAction,
+        page: &Page,
+        output: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), JobError> {
+        match action {
+            ScrapingAction::WaitFor { selector, timeout_ms } => {
+                let timeout = Duration::from_millis(*timeout_ms);
+                let start = std::time::Instant::now();
+                let selector_json = serde_json::to_string(selector)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                
+                loop {
+                    let js = format!("document.querySelector({}) !== null", selector_json);
+                    let result = page.evaluate(js).await
+                        .map_err(|e| JobError::ActionError(format!("WaitFor eval failed: {}", e)))?;
+                    
+                    if let Some(val) = result.value() {
+                        if val.as_bool() == Some(true) {
+                            break;
+                        }
+                    }
+                    
+                    if start.elapsed() > timeout {
+                        return Err(JobError::ActionError(format!("Timeout waiting for selector: {}", selector)));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                output.insert(format!("waitfor:{}", selector), json!(true));
+            }
+            ScrapingAction::Extract { selector, attr } => {
+                let js = if let Some(a) = attr {
+                    format!(
+                        r#"Array.from(document.querySelectorAll("{}")).map(e => e.getAttribute("{}"))"#,
+                        selector, a
+                    )
+                } else {
+                    format!(
+                        r#"Array.from(document.querySelectorAll("{}")).map(e => e.textContent)"#,
+                        selector
+                    )
+                };
+
+                let eval = page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("Extract JS failed: {}", e)))?;
+
+                let values = eval.value().cloned().unwrap_or(json!([]));
+                output.insert(format!("extract:{}", selector), values);
+            }
+            ScrapingAction::ExtractMultiple { selector, attrs } => {
+                let attrs_json = serde_json::to_string(attrs)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize attrs: {}", e)))?;
+                
+                let js = format!(
+                    r#"
+                    Array.from(document.querySelectorAll("{}")).map(e => {{
+                        const result = {{}};
+                        const attrs = {};
+                        attrs.forEach(attr => {{
+                            if (attr === 'text') {{
+                                result[attr] = e.textContent;
+                            }} else {{
+                                result[attr] = e.getAttribute(attr) || '';
+                            }}
+                        }});
+                        return result;
+                    }})
+                    "#,
+                    selector, attrs_json
+                );
+
+                let eval = page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("ExtractMultiple JS failed: {}", e)))?;
+
+                let values = eval.value().cloned().unwrap_or(json!([]));
+                output.insert(format!("extract_multiple:{}", selector), values);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_browser_action(
+        &self,
+        action: &BrowserAction,
+        page: &Page,
+        output: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), JobError> {
+        match action {
+            BrowserAction::Click { selector, timeout_ms } => {
+                // Wait for element to be clickable
+                let timeout = Duration::from_millis(*timeout_ms);
+                let start = std::time::Instant::now();
+                let selector_json = serde_json::to_string(selector)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                
+                loop {
+                    let js = format!("document.querySelector({}) !== null", selector_json);
+                    let result = page.evaluate(js).await
+                        .map_err(|e| JobError::ActionError(format!("Click wait failed: {}", e)))?;
+                    
+                    if let Some(val) = result.value() {
+                        if val.as_bool() == Some(true) {
+                            break;
+                        }
+                    }
+                    
+                    if start.elapsed() > timeout {
+                        return Err(JobError::ActionError(format!("Timeout waiting for clickable element: {}", selector)));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+
+                // Click the element
+                let click_js = format!("document.querySelector({}).click()", selector_json);
+                page.evaluate(click_js).await
+                    .map_err(|e| JobError::ActionError(format!("Click failed: {}", e)))?;
+                
+                output.insert(format!("click:{}", selector), json!(true));
+            }
+            BrowserAction::Type { selector, text, clear_first } => {
+                // Properly escape strings by using JSON serialization
+                let selector_json = serde_json::to_string(selector)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                let text_json = serde_json::to_string(text)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize text: {}", e)))?;
+                
+                let js = if *clear_first {
+                    format!(
+                        r#"
+                        {{
+                            const el = document.querySelector({});
+                            el.value = '';
+                            el.focus();
+                            el.value = {};
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        }}
+                        "#,
+                        selector_json, text_json
+                    )
+                } else {
+                    format!(
+                        r#"
+                        {{
+                            const el = document.querySelector({});
+                            el.focus();
+                            el.value += {};
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        }}
+                        "#,
+                        selector_json, text_json
+                    )
+                };
+
+                page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("Type failed: {}", e)))?;
+                
+                output.insert(format!("type:{}", selector), json!(text));
+            }
+            BrowserAction::PressKey { key } => {
+                // Simulate key press using keyboard events
+                let key_json = serde_json::to_string(key)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize key: {}", e)))?;
+                
+                let js = format!(
+                    r#"
+                    document.dispatchEvent(new KeyboardEvent('keydown', {{ key: {} }}));
+                    document.dispatchEvent(new KeyboardEvent('keyup', {{ key: {} }}));
+                    "#,
+                    key_json, key_json
+                );
+
+                page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("PressKey failed: {}", e)))?;
+                
+                output.insert("press_key".to_string(), json!(key));
+            }
+            BrowserAction::Scroll { target } => {
+                let js = match target {
+                    ScrollTarget::Element { selector } => {
+                        let selector_json = serde_json::to_string(selector)
+                            .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                        format!("document.querySelector({}).scrollIntoView({{ behavior: 'smooth' }})", selector_json)
+                    }
+                    ScrollTarget::Position { x, y } => {
+                        format!("window.scrollTo({}, {})", x, y)
+                    }
+                    ScrollTarget::Bottom => {
+                        "window.scrollTo(0, document.body.scrollHeight)".to_string()
+                    }
+                    ScrollTarget::Top => {
+                        "window.scrollTo(0, 0)".to_string()
+                    }
+                };
+
+                page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("Scroll failed: {}", e)))?;
+                
+                output.insert("scroll".to_string(), json!(true));
+            }
+            BrowserAction::Screenshot { path, full_page } => {
+                let mut screenshot_params = CaptureScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png);
+                
+                if *full_page {
+                    screenshot_params = screenshot_params.capture_beyond_viewport(true);
+                }
+
+                let screenshot_bytes = page.screenshot(screenshot_params.build()).await
+                    .map_err(|e| JobError::ActionError(format!("Screenshot failed: {}", e)))?;
+
+                // Save to file
+                tokio::fs::write(path, &screenshot_bytes).await
+                    .map_err(|e| JobError::ActionError(format!("Failed to save screenshot: {}", e)))?;
+                
+                output.insert("screenshot".to_string(), json!(path));
+            }
+            BrowserAction::Hover { selector } => {
+                let selector_json = serde_json::to_string(selector)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                
+                let js = format!(
+                    r#"
+                    {{
+                        const el = document.querySelector({});
+                        const event = new MouseEvent('mouseover', {{ bubbles: true }});
+                        el.dispatchEvent(event);
+                    }}
+                    "#,
+                    selector_json
+                );
+
+                page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("Hover failed: {}", e)))?;
+                
+                output.insert(format!("hover:{}", selector), json!(true));
+            }
+            BrowserAction::Select { selector, value } => {
+                let selector_json = serde_json::to_string(selector)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                let value_json = serde_json::to_string(value)
+                    .map_err(|e| JobError::ActionError(format!("Failed to serialize value: {}", e)))?;
+                
+                let js = format!(
+                    r#"
+                    {{
+                        const el = document.querySelector({});
+                        el.value = {};
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                    "#,
+                    selector_json, value_json
+                );
+
+                page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("Select failed: {}", e)))?;
+                
+                output.insert(format!("select:{}", selector), json!(value));
+            }
+            BrowserAction::Navigate { url } => {
+                page.goto(url).await
+                    .map_err(|e| JobError::ActionError(format!("Navigate failed: {}", e)))?;
+                page.wait_for_navigation().await
+                    .map_err(|e| JobError::ActionError(format!("Navigation wait failed: {}", e)))?;
+                
+                output.insert("navigate".to_string(), json!(url));
+            }
+            BrowserAction::ExecuteScript { script } => {
+                let result = page.evaluate(script.clone()).await
+                    .map_err(|e| JobError::ActionError(format!("ExecuteScript failed: {}", e)))?;
+                
+                let value = result.value().cloned().unwrap_or(json!(null));
+                output.insert("execute_script".to_string(), value);
+            }
+            BrowserAction::SetCookie { name, value, domain } => {
+                let domain_str = domain.as_ref().map(|d| d.as_str()).unwrap_or("");
+                let js = format!(
+                    r#"document.cookie = "{}={}; domain={}; path=/""#,
+                    name, value, domain_str
+                );
+
+                page.evaluate(js).await
+                    .map_err(|e| JobError::ActionError(format!("SetCookie failed: {}", e)))?;
+                
+                output.insert(format!("set_cookie:{}", name), json!(value));
+            }
+            BrowserAction::WaitForNavigation { timeout_ms } => {
+                let timeout = Duration::from_millis(*timeout_ms);
+                tokio::time::timeout(timeout, page.wait_for_navigation())
+                    .await
+                    .map_err(|_| JobError::ActionError("Navigation timeout".to_string()))?
+                    .map_err(|e| JobError::ActionError(format!("Navigation wait failed: {}", e)))?;
+                
+                output.insert("wait_for_navigation".to_string(), json!(true));
+            }
+        }
+        Ok(())
     }
 }
 

@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Actions that work with both browser and parser workers
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Action {
+pub enum ScrapingAction {
     WaitFor {
         selector: String,
         timeout_ms: u64,
@@ -12,6 +13,69 @@ pub enum Action {
         selector: String,
         attr: Option<String>,
     },
+    ExtractMultiple {
+        selector: String,
+        attrs: Vec<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum BrowserAction {
+    /// Click an element
+    Click {
+        selector: String,
+        timeout_ms: u64,
+    },
+    Type {
+        selector: String,
+        text: String,
+        clear_first: bool,
+    },
+    PressKey {
+        key: String,
+    },
+    Scroll {
+        target: ScrollTarget,
+    },
+    Screenshot {
+        path: String,
+        full_page: bool,
+    },
+    Hover {
+        selector: String,
+    },
+    Select {
+        selector: String,
+        value: String,
+    },
+    Navigate {
+        url: String,
+    },
+    ExecuteScript {
+        script: String,
+    },
+    SetCookie {
+        name: String,
+        value: String,
+        domain: Option<String>,
+    },
+    WaitForNavigation {
+        timeout_ms: u64,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ScrollTarget {
+    Element { selector: String },
+    Position { x: i32, y: i32 },
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Action {
+    Scraping(ScrapingAction),
+    Browser(BrowserAction),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
