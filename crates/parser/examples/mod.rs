@@ -2,7 +2,7 @@ use rocky_core::{Action, Job};
 use rocky_parser::ParserWorker;
 use rocky_scheduler::Scheduler;
 use rocky_storage::JsonFileStorage;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[tokio::main]
 async fn main() {
@@ -21,9 +21,16 @@ async fn main() {
             url: "https://example.com".to_string(),
             use_browser: false,
             actions: vec![
-                Action::WaitFor { selector: "h1".to_string(), timeout_ms: 5000 },
-                Action::Extract { selector: "p".to_string(), attr: None },
+                Action::WaitFor {
+                    selector: "h1".to_string(),
+                    timeout_ms: 5000,
+                },
+                Action::Extract {
+                    selector: "p".to_string(),
+                    attr: None,
+                },
             ],
+            browser_config: None,
         };
         scheduler.submit(job).unwrap();
         sleep(Duration::from_millis(200)).await;

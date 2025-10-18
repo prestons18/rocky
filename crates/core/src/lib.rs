@@ -14,12 +14,27 @@ pub enum Action {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BrowserConfig {
+    pub browser_type: BrowserType,
+    pub headless: bool,
+    pub viewport_width: Option<u32>,
+    pub viewport_height: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum BrowserType {
+    Chromium,
+    Firefox,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
     pub url: String,
     pub use_browser: bool,
     pub actions: Vec<Action>,
+    pub browser_config: Option<BrowserConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
