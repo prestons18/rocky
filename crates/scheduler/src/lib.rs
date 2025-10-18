@@ -1,13 +1,14 @@
 use rocky_core::{Job, JobWorker};
+use rocky_storage::Storage;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use rocky_storage::Storage;
+use tokio::sync::{mpsc, Semaphore};
 
 pub struct Scheduler<W: JobWorker + 'static, S: Storage + 'static> {
     worker: Arc<W>,
     storage: Arc<S>,
     sender: mpsc::Sender<Job>,
+    concurrency_limit: Arc<Semaphore>,
 }
 
 impl<W: JobWorker + 'static, S: Storage + 'static> Clone for Scheduler<W, S> {
@@ -16,17 +17,19 @@ impl<W: JobWorker + 'static, S: Storage + 'static> Clone for Scheduler<W, S> {
             worker: Arc::clone(&self.worker),
             storage: Arc::clone(&self.storage),
             sender: self.sender.clone(),
+            concurrency_limit: Arc::clone(&self.concurrency_limit),
         }
     }
 }
 
 impl<W: JobWorker + 'static, S: Storage + 'static> Scheduler<W, S> {
-    pub fn new(worker: W, storage: S, capacity: usize) -> (Self, mpsc::Receiver<Job>) {
+    pub fn new(worker: W, storage: S, capacity: usize, max_concurrent: usize) -> (Self, mpsc::Receiver<Job>) {
         let (tx, rx) = mpsc::channel(capacity);
         let scheduler = Self {
             worker: Arc::new(worker),
             storage: Arc::new(storage),
             sender: tx,
+            concurrency_limit: Arc::new(Semaphore::new(max_concurrent)),
         };
         (scheduler, rx)
     }
@@ -43,11 +46,15 @@ impl<W: JobWorker + 'static, S: Storage + 'static> Scheduler<W, S> {
                 Some(job) = receiver.recv() => {
                     let worker = Arc::clone(&self.worker);
                     let storage = Arc::clone(&self.storage);
+                    let permit = Arc::clone(&self.concurrency_limit).acquire_owned().await.unwrap();
+
                     futures.push(async move {
+                        // permit ensures only max_concurrent jobs run at a time
                         let result = worker.execute(&job).await;
                         if let Ok(ref r) = result {
                             let _ = storage.save_result(r).await;
                         }
+                        drop(permit); // release the semaphore
                         (job.id.clone(), result)
                     });
                 }
@@ -58,8 +65,7 @@ impl<W: JobWorker + 'static, S: Storage + 'static> Scheduler<W, S> {
                     }
                 }
                 else => {
-                    // Both channel closed and no pending futures
-                    break;
+                    break; // no more jobs and all futures finished
                 }
             }
         }

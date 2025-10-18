@@ -8,16 +8,14 @@ use tokio::time::{sleep, Duration};
 async fn main() {
     let worker = ParserWorker::new();
     let storage = JsonFileStorage::new("results");
-    let (scheduler, receiver) = Scheduler::new(worker, storage, 10);
+    let (scheduler, receiver) = Scheduler::new(worker, storage, 20, 4); // max 4 concurrent jobs
 
-    // Spawn the scheduler loop
     let scheduler_clone = scheduler.clone();
     tokio::spawn(async move {
         scheduler_clone.run(receiver).await;
     });
 
-    // Dynamically submit jobs
-    for i in 1..=5 {
+    for i in 1..=10 {
         let job = Job {
             id: format!("job-00{}", i),
             url: "https://example.com".to_string(),
@@ -28,9 +26,8 @@ async fn main() {
             ],
         };
         scheduler.submit(job).unwrap();
-        sleep(Duration::from_millis(500)).await; // simulate dynamic submission
+        sleep(Duration::from_millis(200)).await;
     }
 
-    // Keep the main task alive
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(15)).await;
 }
