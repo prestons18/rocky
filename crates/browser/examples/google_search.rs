@@ -1,5 +1,5 @@
 use browser::{BrowserWorker, TimeoutConfig};
-use rocky_core::{Job, Action, BrowserAction, ScrapingAction, JobWorker};
+use rocky_core::{Job, Action, BrowserAction, ScrapingAction, JobWorker, BrowserConfig, BrowserType};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,11 +49,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 full_page: true,
             }),
         ],
-        browser_config: None,
+        browser_config: Some(BrowserConfig {
+            browser_type: BrowserType::Chromium,
+            headless: true,
+            viewport_width: Some(1920),
+            viewport_height: Some(1080),
+            fail_on_captcha: true, // Enable CAPTCHA detection
+        }),
     };
     
     println!("🔍 Starting Google search...\n");
-    let result = worker.execute(&job).await?;
+    let result = match worker.execute(&job).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{}", e);
+            return Err(e.into());
+        }
+    };
     
     println!("\n=== Search Results ===");
     

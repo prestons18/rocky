@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use super::actions::ActionHandler;
 use super::wait::WaitStrategy;
-use crate::shared::TimeoutConfig;
+use crate::shared::{TimeoutConfig, js};
 
 pub struct ChromiumWorker {
     browser_instances: Arc<Mutex<Vec<Browser>>>,
@@ -54,6 +54,72 @@ impl ChromiumWorker {
         Ok(browser)
     }
 
+    async fn check_captcha(&self, page: &chromiumoxide::page::Page) -> Result<(), JobError> {
+        let js = js::build_js_call(js::element::DETECT_CAPTCHA, &[]);
+        let result = page.evaluate(js).await
+            .map_err(|e| JobError::script_error(format!("CAPTCHA detection failed: {}", e)))?;
+        
+        if let Some(value) = result.value() {
+            if let Some(obj) = value.as_object() {
+                let detected = obj.get("detected").and_then(|v| v.as_bool()).unwrap_or(false);
+                
+                if detected {
+                    let types = obj.get("types")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    
+                    let keywords = obj.get("keywords")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default();
+                    
+                    let page_title = obj.get("pageTitle")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    
+                    let url = obj.get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    
+                    let title_match = obj.get("titleMatch").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let url_match = obj.get("urlMatch").and_then(|v| v.as_bool()).unwrap_or(false);
+                    
+                    let body_sample = obj.get("bodyTextSample")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    
+                    let message = if !keywords.is_empty() {
+                        format!("CAPTCHA or consent page detected on '{}'", page_title)
+                    } else if !types.is_empty() {
+                        format!("CAPTCHA detected on '{}' (type: {})", page_title, types)
+                    } else {
+                        format!("CAPTCHA or verification page detected on '{}'", page_title)
+                    };
+                    
+                    return Err(JobError::captcha_detected(message)
+                        .with_context(json!({
+                            "types": types,
+                            "keywords": keywords,
+                            "page_title": page_title,
+                            "url": url,
+                            "title_match": title_match,
+                            "url_match": url_match,
+                            "body_sample": body_sample
+                        })));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
     async fn execute_actions(&self, job: &Job, page: &chromiumoxide::page::Page) -> Result<serde_json::Value, JobError> {
         let mut output = serde_json::Map::new();
         let action_handler = ActionHandler::new(self.timeout_config.clone());
@@ -92,6 +158,13 @@ impl JobWorker for ChromiumWorker {
             let wait_strategy = WaitStrategy::new(self.timeout_config.clone());
             wait_strategy.wait_for_stable(&page, self.timeout_config.page_stable.as_millis() as u64).await?;
             println!("  [{}] Page loaded and stabilized", job.id);
+
+            // Check for CAPTCHA if configured
+            if job.browser_config.as_ref().map_or(false, |c| c.fail_on_captcha) {
+                println!("  [{}] Checking for CAPTCHA...", job.id);
+                self.check_captcha(&page).await?;
+                println!("  [{}] ✓ No CAPTCHA detected", job.id);
+            }
 
             let output = self.execute_actions(job, &page).await?;
 

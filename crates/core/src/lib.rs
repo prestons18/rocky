@@ -24,7 +24,6 @@ pub enum ScrapingAction {
 /// Actions that only work with browser workers (require JavaScript execution)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BrowserAction {
-    /// Click an element
     Click {
         selector: String,
         timeout_ms: u64,
@@ -236,7 +235,74 @@ impl JobError {
 
 impl std::fmt::Display for JobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{:?}] {}", self.category, self.message)
+        // Format the error with emoji and better structure
+        let emoji = match self.category {
+            ErrorCategory::Network => "🌐",
+            ErrorCategory::ElementNotFound => "🔍",
+            ErrorCategory::ScriptExecution => "⚙️",
+            ErrorCategory::Navigation => "🧭",
+            ErrorCategory::Browser => "🌐",
+            ErrorCategory::Parsing => "📄",
+            ErrorCategory::Timeout => "⏱️",
+            ErrorCategory::Auth => "🔐",
+            ErrorCategory::RateLimit => "🚦",
+            ErrorCategory::Captcha => "🤖",
+            ErrorCategory::Unknown => "❓",
+        };
+        
+        writeln!(f, "\n{} {} Error", emoji, format!("{:?}", self.category))?;
+        writeln!(f, "   {}", self.message)?;
+        
+        // Add context if available
+        if let Some(obj) = self.context.as_object() {
+            if !obj.is_empty() {
+                writeln!(f, "\n   Context:")?;
+                
+                // Show specific context fields based on error type
+                match self.category {
+                    ErrorCategory::Captcha => {
+                        if let Some(keywords) = obj.get("keywords").and_then(|v| v.as_str()) {
+                            if !keywords.is_empty() {
+                                writeln!(f, "   • Detected keywords: {}", keywords)?;
+                            }
+                        }
+                        if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
+                            writeln!(f, "   • Page URL: {}", url)?;
+                        }
+                    }
+                    ErrorCategory::ElementNotFound => {
+                        if let Some(selector) = obj.get("selector").and_then(|v| v.as_str()) {
+                            writeln!(f, "   • Selector: {}", selector)?;
+                        }
+                        if let Some(timeout) = obj.get("timeout_ms").and_then(|v| v.as_u64()) {
+                            writeln!(f, "   • Timeout: {}ms", timeout)?;
+                        }
+                        if let Some(hint) = obj.get("hint").and_then(|v| v.as_str()) {
+                            writeln!(f, "   • Hint: {}", hint)?;
+                        }
+                    }
+                    _ => {
+                        // Show all context for other error types
+                        for (key, value) in obj.iter() {
+                            if key != "body_sample" { // Skip verbose fields
+                                writeln!(f, "   • {}: {}", key, value)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Add recovery info
+        if self.recoverable {
+            if let Some(retry_ms) = self.retry_after_ms {
+                writeln!(f, "\n   💡 Recoverable: retry after {}ms", retry_ms)?;
+            } else {
+                writeln!(f, "\n   💡 Recoverable: can retry immediately")?;
+            }
+        }
+        
+        Ok(())
     }
 }
 
