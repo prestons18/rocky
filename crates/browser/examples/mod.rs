@@ -1,5 +1,7 @@
 use browser::BrowserWorker;
-use rocky_core::{Action, BrowserAction, BrowserConfig, BrowserType, Job, ScrapingAction, ScrollTarget};
+use rocky_core::{
+    Action, BrowserAction, BrowserConfig, BrowserType, Job, ScrapingAction, ScrollTarget,
+};
 use rocky_parser::ParserWorker;
 use rocky_scheduler::Scheduler;
 use rocky_storage::JsonFileStorage;
@@ -40,9 +42,7 @@ async fn main() {
             use_browser: true,
             actions: vec![
                 // Handle any potential cookie banners
-                Action::Browser(BrowserAction::HandleCookieBanner {
-                    timeout_ms: 2000,
-                }),
+                Action::Browser(BrowserAction::HandleCookieBanner { timeout_ms: 2000 }),
                 // Wait for main heading to be visible
                 Action::Scraping(ScrapingAction::WaitFor {
                     selector: "h1".to_string(),
@@ -65,6 +65,7 @@ async fn main() {
                 headless: true,
                 viewport_width: Some(1920),
                 viewport_height: Some(1080),
+                fail_on_captcha: true,
             }),
         },
         Job {
@@ -73,9 +74,7 @@ async fn main() {
             use_browser: true,
             actions: vec![
                 // First, handle any cookie banners
-                Action::Browser(BrowserAction::HandleCookieBanner {
-                    timeout_ms: 3000,
-                }),
+                Action::Browser(BrowserAction::HandleCookieBanner { timeout_ms: 3000 }),
                 // Wait for search box to be clickable and click it (focuses the input)
                 Action::Browser(BrowserAction::WaitAndClick {
                     selector: "textarea[name='q']".to_string(),
@@ -92,9 +91,7 @@ async fn main() {
                     key: "Enter".to_string(),
                 }),
                 // Wait for navigation to results page
-                Action::Browser(BrowserAction::WaitForNavigation {
-                    timeout_ms: 10000,
-                }),
+                Action::Browser(BrowserAction::WaitForNavigation { timeout_ms: 10000 }),
                 // Verify we're on the search results page by checking for results container
                 Action::Scraping(ScrapingAction::WaitFor {
                     selector: "#search".to_string(),
@@ -125,6 +122,7 @@ async fn main() {
                 headless: false,
                 viewport_width: Some(1280),
                 viewport_height: Some(720),
+                fail_on_captcha: true,
             }),
         },
     ];

@@ -9,13 +9,89 @@ use super::wait::WaitStrategy;
 
 pub struct ActionHandler {
     wait_strategy: WaitStrategy,
+    fail_on_captcha: bool,
 }
 
 impl ActionHandler {
-    pub fn new(config: TimeoutConfig) -> Self {
+    pub fn new(config: TimeoutConfig, fail_on_captcha: bool) -> Self {
         Self {
             wait_strategy: WaitStrategy::new(config),
+            fail_on_captcha,
         }
+    }
+
+    async fn check_captcha(&self, page: &Page) -> Result<(), JobError> {
+        if !self.fail_on_captcha {
+            return Ok(());
+        }
+        
+        let js = js::build_js_call(js::element::DETECT_CAPTCHA, &[]);
+        let result = page.evaluate(js).await
+            .map_err(|e| JobError::script_error(format!("CAPTCHA detection failed: {}", e)))?;
+        
+        if let Some(value) = result.value() {
+            if let Some(obj) = value.as_object() {
+                // Log detection details for debugging
+                let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let detected = obj.get("detected").and_then(|v| v.as_bool()).unwrap_or(false);
+                
+                println!("      URL: {}", url);
+                
+                if detected {
+                    let types = obj.get("types")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    
+                    let keywords = obj.get("keywords")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default();
+                    
+                    let page_title = obj.get("pageTitle")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    
+                    let url = obj.get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    
+                    let title_match = obj.get("titleMatch").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let url_match = obj.get("urlMatch").and_then(|v| v.as_bool()).unwrap_or(false);
+                    
+                    let body_sample = obj.get("bodyTextSample")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    
+                    let message = if !keywords.is_empty() {
+                        format!("CAPTCHA or consent page detected on '{}'", page_title)
+                    } else if !types.is_empty() {
+                        format!("CAPTCHA detected on '{}' (type: {})", page_title, types)
+                    } else {
+                        format!("CAPTCHA or verification page detected on '{}'", page_title)
+                    };
+                    
+                    return Err(JobError::captcha_detected(message)
+                        .with_context(json!({
+                            "types": types,
+                            "keywords": keywords,
+                            "page_title": page_title,
+                            "url": url,
+                            "title_match": title_match,
+                            "url_match": url_match,
+                            "body_sample": body_sample
+                        })));
+                }
+            }
+        }
+        
+        Ok(())
     }
 
     async fn scroll_to_element(&self, page: &Page, selector: &str) -> Result<(), JobError> {
@@ -246,11 +322,27 @@ impl ActionHandler {
                 page.goto(url).await
                     .map_err(|e| JobError::navigation_error(format!("Navigate failed: {}", e)))?;
                 self.wait_strategy.wait_for_stable(page, 30000).await?;
+                
+                // Check for CAPTCHA after navigation
+                if self.fail_on_captcha {
+                    println!("  Checking for CAPTCHA...");
+                    self.check_captcha(page).await?;
+                    println!("  ✓ No CAPTCHA detected");
+                }
+                
                 output.insert("navigate".to_string(), json!(url));
                 Ok(())
             }
             BrowserAction::WaitForNavigation { timeout_ms } => {
                 self.wait_strategy.wait_for_navigation(page, *timeout_ms).await?;
+                
+                // Check for CAPTCHA after navigation completes
+                if self.fail_on_captcha {
+                    println!("  Checking for CAPTCHA...");
+                    self.check_captcha(page).await?;
+                    println!("  ✓ No CAPTCHA detected");
+                }
+                
                 output.insert("wait_for_navigation".to_string(), json!(true));
                 Ok(())
             }

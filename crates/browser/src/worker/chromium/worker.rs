@@ -61,7 +61,11 @@ impl ChromiumWorker {
         
         if let Some(value) = result.value() {
             if let Some(obj) = value.as_object() {
+                // Log detection details for debugging
+                let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let detected = obj.get("detected").and_then(|v| v.as_bool()).unwrap_or(false);
+                
+                println!("      URL: {}", url);
                 
                 if detected {
                     let types = obj.get("types")
@@ -122,7 +126,8 @@ impl ChromiumWorker {
 
     async fn execute_actions(&self, job: &Job, page: &chromiumoxide::page::Page) -> Result<serde_json::Value, JobError> {
         let mut output = serde_json::Map::new();
-        let action_handler = ActionHandler::new(self.timeout_config.clone());
+        let fail_on_captcha = job.browser_config.as_ref().map_or(false, |c| c.fail_on_captcha);
+        let action_handler = ActionHandler::new(self.timeout_config.clone(), fail_on_captcha);
         for (idx, action) in job.actions.iter().enumerate() {
             println!("  [{}] Action {}/{}: {:?}", job.id, idx + 1, job.actions.len(), action);
             
@@ -132,7 +137,7 @@ impl ChromiumWorker {
             };
             
             result.map_err(|e| {
-                eprintln!("  [{}] ✗ Action {}/{} failed: {}", job.id, idx + 1, job.actions.len(), e);
+                eprintln!("  [{}] ✗ Action {}/{} failed", job.id, idx + 1, job.actions.len());
                 e
             })?;
             

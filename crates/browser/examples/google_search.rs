@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         browser_config: Some(BrowserConfig {
             browser_type: BrowserType::Chromium,
-            headless: true,
+            headless: false,
             viewport_width: Some(1920),
             viewport_height: Some(1080),
             fail_on_captcha: true, // Enable CAPTCHA detection
