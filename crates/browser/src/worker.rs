@@ -10,6 +10,21 @@ use tokio::sync::Mutex;
 use tokio::time::Duration;
 use futures::StreamExt;
 
+// Helper to convert chromiumoxide errors to JobError
+fn chrome_error_to_job_error(e: impl std::fmt::Display, action: &str) -> JobError {
+    let error_str = e.to_string();
+    
+    if error_str.contains("timeout") || error_str.contains("Timeout") {
+        JobError::timeout_error(format!("{} timed out: {}", action, error_str))
+    } else if error_str.contains("navigation") || error_str.contains("Navigation") {
+        JobError::navigation_error(format!("{} navigation failed: {}", action, error_str))
+    } else if error_str.contains("not found") || error_str.contains("null") {
+        JobError::element_not_found(format!("{}: {}", action, error_str))
+    } else {
+        JobError::browser_error(format!("{} failed: {}", action, error_str))
+    }
+}
+
 pub struct BrowserWorker {
     browser_instances: Arc<Mutex<Vec<Browser>>>,
 }
@@ -27,17 +42,17 @@ impl BrowserWorker {
         // Create a unique temporary directory for each browser instance to avoid SingletonLock conflicts
         let temp_dir = std::env::temp_dir().join(format!("chromium-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| JobError::FetchError(format!("Failed to create temp dir: {}", e)))?;
+            .map_err(|e| JobError::browser_error(format!("Failed to create temp dir: {}", e)))?;
         
         let chromium_cfg = ChromeConfig::builder()
             .headless_mode(headless_mode)
             .user_data_dir(temp_dir)
             .build()
-            .map_err(|e| JobError::FetchError(format!("Browser launch failed: {}", e)))?;
+            .map_err(|e| JobError::browser_error(format!("Browser config failed: {}", e)))?;
 
         let (browser, mut handler) = Browser::launch(chromium_cfg)
             .await
-            .map_err(|e| JobError::FetchError(format!("Browser launch failed: {}", e)))?;
+            .map_err(|e| JobError::browser_error(format!("Browser launch failed: {}", e)))?;
 
         tokio::spawn(async move {
             while let Some(_) = handler.next().await {}
@@ -81,16 +96,19 @@ impl BrowserWorker {
         output: &mut serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), JobError> {
         match action {
+            ScrapingAction::Fetch { .. } => {
+                // Fetch is handled at the job level
+            }
             ScrapingAction::WaitFor { selector, timeout_ms } => {
                 let timeout = Duration::from_millis(*timeout_ms);
                 let start = std::time::Instant::now();
                 let selector_json = serde_json::to_string(selector)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
                 
                 loop {
                     let js = format!("document.querySelector({}) !== null", selector_json);
                     let result = page.evaluate(js).await
-                        .map_err(|e| JobError::ActionError(format!("WaitFor eval failed: {}", e)))?;
+                        .map_err(|e| chrome_error_to_job_error(e, "WaitFor"))?;
                     
                     if let Some(val) = result.value() {
                         if val.as_bool() == Some(true) {
@@ -99,7 +117,8 @@ impl BrowserWorker {
                     }
                     
                     if start.elapsed() > timeout {
-                        return Err(JobError::ActionError(format!("Timeout waiting for selector: {}", selector)));
+                        return Err(JobError::timeout_error(format!("Timeout waiting for selector: {}", selector))
+                            .with_context(json!({ "selector": selector, "timeout_ms": timeout_ms })));
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -119,14 +138,14 @@ impl BrowserWorker {
                 };
 
                 let eval = page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("Extract JS failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("Extract JS failed: {}", e)))?;
 
                 let values = eval.value().cloned().unwrap_or(json!([]));
                 output.insert(format!("extract:{}", selector), values);
             }
             ScrapingAction::ExtractMultiple { selector, attrs } => {
                 let attrs_json = serde_json::to_string(attrs)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize attrs: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize attrs: {}", e)))?;
                 
                 let js = format!(
                     r#"
@@ -147,7 +166,7 @@ impl BrowserWorker {
                 );
 
                 let eval = page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("ExtractMultiple JS failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("ExtractMultiple JS failed: {}", e)))?;
 
                 let values = eval.value().cloned().unwrap_or(json!([]));
                 output.insert(format!("extract_multiple:{}", selector), values);
@@ -168,12 +187,12 @@ impl BrowserWorker {
                 let timeout = Duration::from_millis(*timeout_ms);
                 let start = std::time::Instant::now();
                 let selector_json = serde_json::to_string(selector)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
                 
                 loop {
                     let js = format!("document.querySelector({}) !== null", selector_json);
                     let result = page.evaluate(js).await
-                        .map_err(|e| JobError::ActionError(format!("Click wait failed: {}", e)))?;
+                        .map_err(|e| JobError::script_error(format!("Click wait failed: {}", e)))?;
                     
                     if let Some(val) = result.value() {
                         if val.as_bool() == Some(true) {
@@ -182,7 +201,7 @@ impl BrowserWorker {
                     }
                     
                     if start.elapsed() > timeout {
-                        return Err(JobError::ActionError(format!("Timeout waiting for clickable element: {}", selector)));
+                        return Err(JobError::timeout_error(format!("Timeout waiting for clickable element: {}", selector)));
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -190,16 +209,16 @@ impl BrowserWorker {
                 // Click the element
                 let click_js = format!("document.querySelector({}).click()", selector_json);
                 page.evaluate(click_js).await
-                    .map_err(|e| JobError::ActionError(format!("Click failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("Click failed: {}", e)))?;
                 
                 output.insert(format!("click:{}", selector), json!(true));
             }
             BrowserAction::Type { selector, text, clear_first } => {
                 // Properly escape strings by using JSON serialization
                 let selector_json = serde_json::to_string(selector)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
                 let text_json = serde_json::to_string(text)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize text: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize text: {}", e)))?;
                 
                 let js = if *clear_first {
                     format!(
@@ -229,14 +248,14 @@ impl BrowserWorker {
                 };
 
                 page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("Type failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("Type failed: {}", e)))?;
                 
                 output.insert(format!("type:{}", selector), json!(text));
             }
             BrowserAction::PressKey { key } => {
                 // Simulate key press using keyboard events
                 let key_json = serde_json::to_string(key)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize key: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize key: {}", e)))?;
                 
                 let js = format!(
                     r#"
@@ -247,7 +266,7 @@ impl BrowserWorker {
                 );
 
                 page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("PressKey failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("PressKey failed: {}", e)))?;
                 
                 output.insert("press_key".to_string(), json!(key));
             }
@@ -255,7 +274,7 @@ impl BrowserWorker {
                 let js = match target {
                     ScrollTarget::Element { selector } => {
                         let selector_json = serde_json::to_string(selector)
-                            .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                            .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
                         format!("document.querySelector({}).scrollIntoView({{ behavior: 'smooth' }})", selector_json)
                     }
                     ScrollTarget::Position { x, y } => {
@@ -270,7 +289,7 @@ impl BrowserWorker {
                 };
 
                 page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("Scroll failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("Scroll failed: {}", e)))?;
                 
                 output.insert("scroll".to_string(), json!(true));
             }
@@ -283,17 +302,17 @@ impl BrowserWorker {
                 }
 
                 let screenshot_bytes = page.screenshot(screenshot_params.build()).await
-                    .map_err(|e| JobError::ActionError(format!("Screenshot failed: {}", e)))?;
+                    .map_err(|e| JobError::browser_error(format!("Screenshot failed: {}", e)))?;
 
                 // Save to file
                 tokio::fs::write(path, &screenshot_bytes).await
-                    .map_err(|e| JobError::ActionError(format!("Failed to save screenshot: {}", e)))?;
+                    .map_err(|e| JobError::browser_error(format!("Failed to save screenshot: {}", e)))?;
                 
                 output.insert("screenshot".to_string(), json!(path));
             }
             BrowserAction::Hover { selector } => {
                 let selector_json = serde_json::to_string(selector)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
                 
                 let js = format!(
                     r#"
@@ -307,15 +326,15 @@ impl BrowserWorker {
                 );
 
                 page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("Hover failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("Hover failed: {}", e)))?;
                 
                 output.insert(format!("hover:{}", selector), json!(true));
             }
             BrowserAction::Select { selector, value } => {
                 let selector_json = serde_json::to_string(selector)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize selector: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
                 let value_json = serde_json::to_string(value)
-                    .map_err(|e| JobError::ActionError(format!("Failed to serialize value: {}", e)))?;
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize value: {}", e)))?;
                 
                 let js = format!(
                     r#"
@@ -329,21 +348,21 @@ impl BrowserWorker {
                 );
 
                 page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("Select failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("Select failed: {}", e)))?;
                 
                 output.insert(format!("select:{}", selector), json!(value));
             }
             BrowserAction::Navigate { url } => {
                 page.goto(url).await
-                    .map_err(|e| JobError::ActionError(format!("Navigate failed: {}", e)))?;
+                    .map_err(|e| JobError::navigation_error(format!("Navigate failed: {}", e)))?;
                 page.wait_for_navigation().await
-                    .map_err(|e| JobError::ActionError(format!("Navigation wait failed: {}", e)))?;
+                    .map_err(|e| JobError::navigation_error(format!("Navigation wait failed: {}", e)))?;
                 
                 output.insert("navigate".to_string(), json!(url));
             }
             BrowserAction::ExecuteScript { script } => {
                 let result = page.evaluate(script.clone()).await
-                    .map_err(|e| JobError::ActionError(format!("ExecuteScript failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("ExecuteScript failed: {}", e)))?;
                 
                 let value = result.value().cloned().unwrap_or(json!(null));
                 output.insert("execute_script".to_string(), value);
@@ -356,7 +375,7 @@ impl BrowserWorker {
                 );
 
                 page.evaluate(js).await
-                    .map_err(|e| JobError::ActionError(format!("SetCookie failed: {}", e)))?;
+                    .map_err(|e| JobError::script_error(format!("SetCookie failed: {}", e)))?;
                 
                 output.insert(format!("set_cookie:{}", name), json!(value));
             }
@@ -364,10 +383,35 @@ impl BrowserWorker {
                 let timeout = Duration::from_millis(*timeout_ms);
                 tokio::time::timeout(timeout, page.wait_for_navigation())
                     .await
-                    .map_err(|_| JobError::ActionError("Navigation timeout".to_string()))?
-                    .map_err(|e| JobError::ActionError(format!("Navigation wait failed: {}", e)))?;
+                    .map_err(|_| JobError::timeout_error("Navigation timeout".to_string()))?
+                    .map_err(|e| JobError::navigation_error(format!("Navigation wait failed: {}", e)))?;
                 
                 output.insert("wait_for_navigation".to_string(), json!(true));
+            }
+            BrowserAction::WaitFor { selector, timeout_ms } => {
+                let timeout = Duration::from_millis(*timeout_ms);
+                let start = std::time::Instant::now();
+                let selector_json = serde_json::to_string(selector)
+                    .map_err(|e| JobError::parsing_error(format!("Failed to serialize selector: {}", e)))?;
+                
+                loop {
+                    let js = format!("document.querySelector({}) !== null", selector_json);
+                    let result = page.evaluate(js).await
+                        .map_err(|e| chrome_error_to_job_error(e, "WaitFor"))?;
+                    
+                    if let Some(val) = result.value() {
+                        if val.as_bool() == Some(true) {
+                            break;
+                        }
+                    }
+                    
+                    if start.elapsed() > timeout {
+                        return Err(JobError::timeout_error(format!("Timeout waiting for selector: {}", selector))
+                            .with_context(json!({ "selector": selector, "timeout_ms": timeout_ms })));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                output.insert(format!("waitfor:{}", selector), json!(true));
             }
         }
         Ok(())
@@ -385,12 +429,12 @@ impl JobWorker for BrowserWorker {
 
         let browser = self.get_browser(job.browser_config.clone()).await?;
         let page = browser.new_page("about:blank").await
-            .map_err(|e| JobError::FetchError(format!("New page failed: {}", e)))?;
+            .map_err(|e| JobError::browser_error(format!("New page failed: {}", e)))?;
 
         page.goto(job.url.clone()).await
-            .map_err(|e| JobError::FetchError(format!("Navigation failed: {}", e)))?;
+            .map_err(|e| JobError::navigation_error(format!("Navigation failed: {}", e)))?;
         page.wait_for_navigation().await
-            .map_err(|e| JobError::FetchError(format!("Navigation wait failed: {}", e)))?;
+            .map_err(|e| JobError::navigation_error(format!("Navigation wait failed: {}", e)))?;
 
         let output = self.perform_actions(job, &page).await?;
 

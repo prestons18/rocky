@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use rocky_core::{Action, Job, JobError, JobResult, JobWorker, ScrapingAction};
+use rocky_core::{Action, Job, JobError, JobResult, JobWorker, ScrapingAction, ErrorCategory};
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::json;
@@ -20,15 +20,19 @@ impl ParserWorker {
         output: &mut serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), JobError> {
         match action {
+            ScrapingAction::Fetch { .. } => {
+                // Fetch is handled at the job level, not per action
+            }
             ScrapingAction::WaitFor { selector, .. } => {
+                // For static HTML parsing, we just check if the element exists
                 let sel = Selector::parse(selector)
-                    .map_err(|e| JobError::ActionError(e.to_string()))?;
+                    .map_err(|e| JobError::parsing_error(e.to_string()))?;
                 let found = document.select(&sel).next().is_some();
                 output.insert(format!("waitfor:{}", selector), json!(found));
             }
             ScrapingAction::Extract { selector, attr } => {
                 let sel = Selector::parse(selector)
-                    .map_err(|e| JobError::ActionError(e.to_string()))?;
+                    .map_err(|e| JobError::parsing_error(e.to_string()))?;
                 let values: Vec<String> = document
                     .select(&sel)
                     .map(|el| {
@@ -43,7 +47,7 @@ impl ParserWorker {
             }
             ScrapingAction::ExtractMultiple { selector, attrs } => {
                 let sel = Selector::parse(selector)
-                    .map_err(|e| JobError::ActionError(e.to_string()))?;
+                    .map_err(|e| JobError::parsing_error(e.to_string()))?;
                 let results: Vec<serde_json::Value> = document
                     .select(&sel)
                     .map(|el| {
@@ -74,10 +78,10 @@ impl JobWorker for ParserWorker {
             .get(&job.url)
             .send()
             .await
-            .map_err(|e| JobError::FetchError(e.to_string()))?
+            .map_err(|e| JobError::fetch_error(e.to_string()))?
             .text()
             .await
-            .map_err(|e| JobError::FetchError(e.to_string()))?;
+            .map_err(|e| JobError::fetch_error(e.to_string()))?;
 
         let document = Html::parse_document(&html);
         let mut output = serde_json::Map::new();
@@ -89,8 +93,9 @@ impl JobWorker for ParserWorker {
                     self.handle_scraping_action(scraping_action, &document, &mut output)?;
                 }
                 Action::Browser(_) => {
-                    return Err(JobError::ActionError(
-                        "ParserWorker cannot execute browser actions. Use BrowserWorker instead.".to_string()
+                    return Err(JobError::new(
+                        ErrorCategory::Unknown,
+                        "ParserWorker cannot execute browser actions. Use BrowserWorker instead."
                     ));
                 }
             }
