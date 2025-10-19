@@ -167,8 +167,8 @@ impl<S: Storage + 'static> Scheduler<S> {
                 Some((job_id, res)) = futures.next() => {
                     match res {
                         Ok(_result) => println!("✓ Job {} succeeded", job_id),
-                        Err(_err) => {
-                            // Error handling already done above
+                        Err(err) => {
+                            eprintln!("✗ Job {} final error: {}", job_id, err);
                         }
                     }
                 }

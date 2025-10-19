@@ -69,6 +69,16 @@ pub enum BrowserAction {
         selector: String,
         timeout_ms: u64,
     },
+    /// Automatically detect and handle cookie consent banners
+    /// Looks for common patterns like "Accept", "Accept All", "I Agree", etc.
+    HandleCookieBanner {
+        timeout_ms: u64,
+    },
+    /// Wait until an element is visible, not obscured, and clickable, then click it
+    WaitAndClick {
+        selector: String,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +101,9 @@ pub struct BrowserConfig {
     pub headless: bool,
     pub viewport_width: Option<u32>,
     pub viewport_height: Option<u32>,
+    /// If true, check for CAPTCHA after navigation and fail the job if detected
+    #[serde(default)]
+    pub fail_on_captcha: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -136,6 +149,8 @@ pub enum ErrorCategory {
     Auth,
     /// Rate limiting or blocking
     RateLimit,
+    /// CAPTCHA detected
+    Captcha,
     /// Unknown or uncategorized errors
     Unknown,
 }
@@ -211,6 +226,11 @@ impl JobError {
 
     pub fn parsing_error(message: impl Into<String>) -> Self {
         Self::new(ErrorCategory::Parsing, message)
+    }
+
+    pub fn captcha_detected(message: impl Into<String>) -> Self {
+        Self::new(ErrorCategory::Captcha, message)
+            .with_context(serde_json::json!({ "hint": "CAPTCHA detected, job cannot proceed" }))
     }
 }
 
